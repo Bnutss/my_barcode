@@ -59,6 +59,17 @@ flutter build windows --release
 
 Результат лежит в `build/windows/x64/runner/Release/`. Запускайте `my_barcode.exe` из этой папки целиком, рядом с ним нужны DLL и папка `data`.
 
+### Готовая сборка из GitHub Actions
+
+При каждом пуше в `main` GitHub сам собирает Windows-версию, прогоняет анализ и тесты. Готовый архив лежит на вкладке **Actions**: откройте последний запуск и скачайте `my_barcode-windows` из раздела Artifacts. Распакуйте архив целиком и запустите `my_barcode.exe`.
+
+Чтобы выпустить релиз с архивом, создайте тег:
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
 Для проверки интерфейса и логики на macOS или Linux можно добавить нужную платформу (`flutter create --platforms=macos .`) и запустить `flutter run -d macos`. Оконные настройки Windows в этом случае отключены автоматически.
 
 ## Где хранятся шаблоны
