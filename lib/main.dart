@@ -49,6 +49,15 @@ Future<void> main() async {
   runApp(const BarcodeApp());
 }
 
+/// Компактные диалоги: заголовок поменьше, отступы 20 → аккуратнее.
+const _dialogTheme = ContentDialogThemeData(
+  padding: EdgeInsetsDirectional.all(20),
+  titlePadding: EdgeInsetsDirectional.only(bottom: 12),
+  bodyPadding: EdgeInsetsDirectional.zero,
+  actionsPadding: EdgeInsetsDirectional.only(top: 20),
+  titleStyle: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
+);
+
 class BarcodeApp extends StatelessWidget {
   const BarcodeApp({super.key});
 
@@ -66,12 +75,14 @@ class BarcodeApp extends StatelessWidget {
       color: accent,
       theme: FluentThemeData(
         brightness: Brightness.light,
+        dialogTheme: _dialogTheme,
         accentColor: accent,
         scaffoldBackgroundColor: transparent,
         visualDensity: VisualDensity.standard,
       ),
       darkTheme: FluentThemeData(
         brightness: Brightness.dark,
+        dialogTheme: _dialogTheme,
         accentColor: accent,
         scaffoldBackgroundColor: transparent,
         visualDensity: VisualDensity.standard,

@@ -78,8 +78,10 @@ class _EditorPageState extends State<EditorPage> with WindowListener {
   @override
   void onWindowClose() async {
     if (await _confirmDiscard()) {
-      await windowManager.setPreventClose(false);
-      await windowManager.destroy();
+      // Сначала прячем окно, чтобы закрытие выглядело мгновенным, и завершаем
+      // процесс сразу: остановка движка Flutter вручную занимает заметное время.
+      await windowManager.hide();
+      exit(0);
     }
   }
 
@@ -180,6 +182,7 @@ class _EditorPageState extends State<EditorPage> with WindowListener {
       context: context,
       builder: (ctx) => ContentDialog(
         title: const Text('Есть несохранённые изменения'),
+        constraints: const BoxConstraints(maxWidth: 360),
         content: Text(templateName == null
             ? 'Макет не сохранён как шаблон. Сохранить?'
             : 'Изменения в шаблоне «$templateName» не сохранены. Сохранить?'),
@@ -210,6 +213,7 @@ class _EditorPageState extends State<EditorPage> with WindowListener {
       context: context,
       builder: (ctx) => ContentDialog(
         title: const Text('Сохранить шаблон'),
+        constraints: const BoxConstraints(maxWidth: 340),
         content: InfoLabel(
           label: 'Название',
           child: TextBox(
@@ -278,9 +282,9 @@ class _EditorPageState extends State<EditorPage> with WindowListener {
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setD) => ContentDialog(
           title: const Text('Открыть шаблон'),
-          constraints: const BoxConstraints(maxWidth: 420),
+          constraints: const BoxConstraints(maxWidth: 360),
           content: SizedBox(
-            height: 300,
+            height: 240,
             child: names.isEmpty
                 ? const Center(child: Text('Сохранённых шаблонов нет'))
                 : ListView(children: [
@@ -499,7 +503,15 @@ class _EditorPageState extends State<EditorPage> with WindowListener {
     final title = Row(
       children: [
         const SizedBox(width: 12),
-        Icon(FluentIcons.tag, size: 14, color: t.accentColor),
+        Image.asset(
+          'assets/images/AA.png',
+          width: 16,
+          height: 16,
+          cacheWidth: 48,
+          filterQuality: FilterQuality.medium,
+          errorBuilder: (_, _, _) =>
+              Icon(FluentIcons.tag, size: 14, color: t.accentColor),
+        ),
         const SizedBox(width: 8),
         Text(
           'Печать стикеров',
@@ -647,8 +659,21 @@ class _EditorPageState extends State<EditorPage> with WindowListener {
             const SizedBox(width: 16),
             Text('${e.title}: X ${_fmt(e.x)}, Y ${_fmt(e.y)} мм', style: style),
           ],
-          const Spacer(),
-          Text('Стрелки — сдвиг, Shift — крупнее, Del — удалить', style: style),
+          const SizedBox(width: 16),
+          Expanded(
+            child: Text(
+              'Стрелки — сдвиг, Shift — крупнее, Del — удалить',
+              style: style,
+              textAlign: TextAlign.right,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          const SizedBox(width: 12),
+          Container(width: 1, height: 14, color: _stroke),
+          const SizedBox(width: 12),
+          Text('Asad Abdullajonov Programm',
+              style: style?.copyWith(fontWeight: FontWeight.w600)),
         ],
       ),
     );

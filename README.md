@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/images/AA.png" alt="my_barcode" width="140">
+</p>
+
 # my_barcode
 
 Настольная программа для Windows: визуальный редактор стикеров со штрих-кодами и печать на выбранный принтер.
@@ -109,6 +113,10 @@ lib/
 ├── pdf_builder.dart   сборка PDF стикера для печати
 └── templates.dart     сохранение и загрузка шаблонов
 ```
+
+## Автор
+
+Asad Abdullajonov Programm
 
 ## Планы
 
