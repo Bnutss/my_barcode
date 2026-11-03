@@ -4,7 +4,6 @@ import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:barcode_widget/barcode_widget.dart';
-import 'package:file_selector/file_selector.dart';
 import 'package:fluent_ui/fluent_ui.dart';
 import 'package:flutter/services.dart'
     show HardwareKeyboard, KeyEvent, KeyUpEvent, LogicalKeyboardKey, Uint8List;
@@ -13,6 +12,7 @@ import 'package:printing/printing.dart';
 import 'package:window_manager/window_manager.dart';
 
 import 'main.dart' show micaEnabled;
+import 'image_picker.dart';
 import 'models.dart';
 import 'pdf_builder.dart';
 import 'templates.dart';
@@ -42,6 +42,7 @@ class _EditorPageState extends State<EditorPage> with WindowListener {
   String _saved = '';
 
   final Map<int, TextEditingController> _ctls = {};
+  final ImagePicker _picker = ImagePicker();
   final GlobalKey _labelKey = GlobalKey();
   Offset? _lastGlobal;
   final FocusNode _pageFocus = FocusNode(debugLabel: 'editor');
@@ -90,6 +91,7 @@ class _EditorPageState extends State<EditorPage> with WindowListener {
   @override
   void onWindowClose() async {
     if (await _confirmDiscard()) {
+      _picker.cancel();
       // Сначала прячем окно, чтобы закрытие выглядело мгновенным, и завершаем
       // процесс сразу: остановка движка Flutter вручную занимает заметное время.
       await windowManager.hide();
@@ -145,17 +147,34 @@ class _EditorPageState extends State<EditorPage> with WindowListener {
   /// Выбор картинки: нормализуем в PNG и ограничиваем 1200 px по длинной стороне,
   /// чтобы шаблоны и PDF оставались лёгкими.
   Future<({Uint8List bytes, double aspect})?> _pickImage() async {
-    try {
-      final file = await openFile(
-        acceptedTypeGroups: [
-          const XTypeGroup(
-            label: 'Изображения',
-            extensions: ['png', 'jpg', 'jpeg', 'bmp', 'gif', 'webp'],
-          ),
-        ],
+    if (_picker.busy) {
+      // Предыдущее окно выбора не открылось или ещё грузится: закрываем его.
+      _picker.cancel();
+      _notify(
+        'Окно выбора файла не ответило и было закрыто. Нажмите ещё раз '
+        'или используйте «Указать путь к файлу…».',
+        severity: InfoBarSeverity.warning,
       );
-      if (file == null) return null;
-      final raw = await file.readAsBytes();
+      return null;
+    }
+    String? path;
+    try {
+      path = await _picker.pickImagePath();
+    } catch (e) {
+      // Окно выбора не запустилось — предлагаем указать путь вручную.
+      _notify(
+        'Не удалось открыть окно выбора файла: $e',
+        severity: InfoBarSeverity.warning,
+      );
+      path = await _askImagePath();
+    }
+    if (path == null || !mounted) return null;
+    return _decodeImage(path);
+  }
+
+  Future<({Uint8List bytes, double aspect})?> _decodeImage(String path) async {
+    try {
+      final raw = await File(path).readAsBytes();
       var codec = await ui.instantiateImageCodec(raw);
       var img = (await codec.getNextFrame()).image;
       const maxSide = 1200;
@@ -180,8 +199,57 @@ class _EditorPageState extends State<EditorPage> with WindowListener {
     }
   }
 
-  Future<void> _addImage({bool background = false}) async {
-    final p = await _pickImage();
+  /// Запасной способ без системного окна: вставить путь к файлу.
+  Future<String?> _askImagePath() async {
+    final c = TextEditingController();
+    final path = await showDialog<String>(
+      context: context,
+      builder: (ctx) => ContentDialog(
+        title: const Text('Путь к изображению'),
+        constraints: const BoxConstraints(maxWidth: 420),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            TextBox(
+              controller: c,
+              autofocus: true,
+              placeholder: r'C:\Users\...\logo.png',
+              onSubmitted: (v) => Navigator.pop(ctx, v),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'В проводнике: Shift + правая кнопка по файлу → «Копировать как путь».',
+              style: FluentTheme.of(ctx).typography.caption,
+            ),
+          ],
+        ),
+        actions: [
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, c.text),
+            child: const Text('Добавить'),
+          ),
+          Button(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Отмена'),
+          ),
+        ],
+      ),
+    );
+    c.dispose();
+    final clean = path?.trim().replaceAll('"', '');
+    if (clean == null || clean.isEmpty) return null;
+    if (!File(clean).existsSync()) {
+      _notify('Файл не найден: $clean', severity: InfoBarSeverity.error);
+      return null;
+    }
+    return clean;
+  }
+
+  Future<void> _addImageFromPath(String path) => _addImage(path: path);
+
+  Future<void> _addImage({bool background = false, String? path}) async {
+    final p = path != null ? await _decodeImage(path) : await _pickImage();
     if (p == null || !mounted) return;
     final e = LabelElement(
       id: _nextId++,
@@ -975,6 +1043,15 @@ class _EditorPageState extends State<EditorPage> with WindowListener {
                 ),
               ),
             ],
+          ),
+          const SizedBox(height: 4),
+          HyperlinkButton(
+            onPressed: () async {
+              final path = await _askImagePath();
+              if (path == null) return;
+              await _addImageFromPath(path);
+            },
+            child: const Text('Указать путь к файлу…'),
           ),
           _header('Слои'),
           if (elements.isEmpty)

@@ -31,6 +31,17 @@ jobs:
       - name: Тесты
         run: flutter test
 
+      - name: Проверка синтаксиса скрипта выбора файла
+        shell: pwsh
+        run: |
+          $src = Get-Content lib/image_picker.dart -Raw -Encoding UTF8
+          $m = [regex]::Match($src, "r'''(.*?)'''", 'Singleline')
+          if (-not $m.Success) { throw 'Скрипт не найден' }
+          $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseInput($m.Groups[1].Value, [ref]$null, [ref]$errors)
+          if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Error $_.Message }; exit 1 }
+          'Скрипт корректен'
+
       - name: Сборка
         run: flutter build windows --release
 
