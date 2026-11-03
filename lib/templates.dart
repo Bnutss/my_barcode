@@ -14,11 +14,14 @@ class LabelTemplate {
 /// Шаблоны лежат в %APPDATA%\my_barcode\templates\*.json
 class TemplateStore {
   static Directory get _dir {
-    final base = Platform.environment['APPDATA'] ??
+    final base =
+        Platform.environment['APPDATA'] ??
         Platform.environment['HOME'] ??
         Directory.current.path;
-    return Directory('$base${Platform.pathSeparator}my_barcode'
-        '${Platform.pathSeparator}templates');
+    return Directory(
+      '$base${Platform.pathSeparator}my_barcode'
+      '${Platform.pathSeparator}templates',
+    );
   }
 
   static String _safe(String name) =>
@@ -28,7 +31,11 @@ class TemplateStore {
       File('${_dir.path}${Platform.pathSeparator}${_safe(name)}.json');
 
   static Future<void> save(
-      String name, double w, double h, List<LabelElement> elements) async {
+    String name,
+    double w,
+    double h,
+    List<LabelElement> elements,
+  ) async {
     await _dir.create(recursive: true);
     final json = {
       'name': name.trim(),
@@ -56,8 +63,8 @@ class TemplateStore {
   static Future<bool> exists(String name) => _file(name).exists();
 
   static Future<LabelTemplate> load(String name) async {
-    final j = jsonDecode(await _file(name).readAsString())
-        as Map<String, dynamic>;
+    final j =
+        jsonDecode(await _file(name).readAsString()) as Map<String, dynamic>;
     var id = 1;
     return LabelTemplate(
       name,
@@ -65,7 +72,7 @@ class TemplateStore {
       (j['height'] as num).toDouble(),
       [
         for (final e in (j['elements'] as List))
-          LabelElement.fromJson(id++, e as Map<String, dynamic>)
+          LabelElement.fromJson(id++, e as Map<String, dynamic>),
       ],
     );
   }

@@ -1,7 +1,10 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
+import 'dart:ui' as ui;
 
 import 'package:barcode_widget/barcode_widget.dart';
+import 'package:file_selector/file_selector.dart';
 import 'package:fluent_ui/fluent_ui.dart';
 import 'package:flutter/services.dart'
     show HardwareKeyboard, KeyEvent, KeyUpEvent, LogicalKeyboardKey, Uint8List;
@@ -39,6 +42,8 @@ class _EditorPageState extends State<EditorPage> with WindowListener {
   String _saved = '';
 
   final Map<int, TextEditingController> _ctls = {};
+  final GlobalKey _labelKey = GlobalKey();
+  Offset? _lastGlobal;
   final FocusNode _pageFocus = FocusNode(debugLabel: 'editor');
 
   FluentThemeData get t => FluentTheme.of(context);
@@ -55,8 +60,15 @@ class _EditorPageState extends State<EditorPage> with WindowListener {
   @override
   void initState() {
     super.initState();
-    _add(ElementType.text,
-        text: 'Товар', x: 3, y: 3, w: 54, fontSize: 12, bold: true);
+    _add(
+      ElementType.text,
+      text: 'Товар',
+      x: 3,
+      y: 3,
+      w: 54,
+      fontSize: 12,
+      bold: true,
+    );
     _add(ElementType.line, x: 3, y: 11, w: 54);
     _add(ElementType.barcode, text: '123456789012', x: 5, y: 14, w: 50, h: 20);
     selectedId = null;
@@ -91,7 +103,8 @@ class _EditorPageState extends State<EditorPage> with WindowListener {
       if (!mounted) return;
       setState(() {
         printers = list;
-        printer = list.where((p) => p.name == printer?.name).firstOrNull ??
+        printer =
+            list.where((p) => p.name == printer?.name).firstOrNull ??
             list.where((p) => p.isDefault).firstOrNull ??
             list.firstOrNull;
       });
@@ -129,6 +142,122 @@ class _EditorPageState extends State<EditorPage> with WindowListener {
     });
   }
 
+  /// Выбор картинки: нормализуем в PNG и ограничиваем 1200 px по длинной стороне,
+  /// чтобы шаблоны и PDF оставались лёгкими.
+  Future<({Uint8List bytes, double aspect})?> _pickImage() async {
+    try {
+      final file = await openFile(
+        acceptedTypeGroups: [
+          const XTypeGroup(
+            label: 'Изображения',
+            extensions: ['png', 'jpg', 'jpeg', 'bmp', 'gif', 'webp'],
+          ),
+        ],
+      );
+      if (file == null) return null;
+      final raw = await file.readAsBytes();
+      var codec = await ui.instantiateImageCodec(raw);
+      var img = (await codec.getNextFrame()).image;
+      const maxSide = 1200;
+      if (img.width > maxSide || img.height > maxSide) {
+        final wide = img.width >= img.height;
+        codec = await ui.instantiateImageCodec(
+          raw,
+          targetWidth: wide ? maxSide : null,
+          targetHeight: wide ? null : maxSide,
+        );
+        img = (await codec.getNextFrame()).image;
+      }
+      final png = await img.toByteData(format: ui.ImageByteFormat.png);
+      if (png == null) throw 'не удалось закодировать изображение';
+      return (bytes: png.buffer.asUint8List(), aspect: img.width / img.height);
+    } catch (e) {
+      _notify(
+        'Не удалось открыть изображение: $e',
+        severity: InfoBarSeverity.error,
+      );
+      return null;
+    }
+  }
+
+  Future<void> _addImage({bool background = false}) async {
+    final p = await _pickImage();
+    if (p == null || !mounted) return;
+    final e = LabelElement(
+      id: _nextId++,
+      type: ElementType.image,
+      imageBytes: p.bytes,
+      imageAspect: p.aspect,
+    );
+    if (background) {
+      e
+        ..x = 0
+        ..y = 0
+        ..w = labelW
+        ..h = labelH
+        ..cover = true;
+    } else {
+      var w = math.min(20.0, labelW * 0.4);
+      var h = w / p.aspect;
+      if (h > labelH - 6) {
+        h = labelH - 6;
+        w = h * p.aspect;
+      }
+      e
+        ..x = 3
+        ..y = 3
+        ..w = _r(w)
+        ..h = _r(h);
+    }
+    setState(() {
+      // Фон уходит на самый задний план, остальное — наверх.
+      background ? elements.insert(0, e) : elements.add(e);
+      selectedId = e.id;
+    });
+  }
+
+  Future<void> _replaceImage(LabelElement e) async {
+    final p = await _pickImage();
+    if (p == null) return;
+    setState(() {
+      e.imageBytes = p.bytes;
+      e.imageAspect = p.aspect;
+    });
+  }
+
+  void _fitToLabel(LabelElement e) => setState(() {
+    e
+      ..x = 0
+      ..y = 0
+      ..w = labelW
+      ..h = labelH
+      ..rotation = 0
+      ..cover = true;
+  });
+
+  void _setRotation(LabelElement e, double deg) =>
+      setState(() => e.rotation = ((deg % 360) + 360) % 360);
+
+  void _fontStep(LabelElement e, double delta) => setState(
+    () => e.fontSize = (e.fontSize + delta).clamp(3.0, 200.0).toDouble(),
+  );
+
+  /// 0 — на задний план, 1 — назад, 2 — вперёд, 3 — на передний план.
+  void _reorder(LabelElement e, int mode) {
+    final i = elements.indexOf(e);
+    final j = switch (mode) {
+      0 => 0,
+      1 => i - 1,
+      2 => i + 1,
+      _ => elements.length - 1,
+    }.clamp(0, elements.length - 1);
+    if (j == i) return;
+    setState(() {
+      elements.removeAt(i);
+      elements.insert(j, e);
+    });
+  }
+
   void _duplicate(LabelElement src) {
     final e = LabelElement.fromJson(_nextId++, src.toJson())
       ..x = src.x + 2
@@ -148,10 +277,10 @@ class _EditorPageState extends State<EditorPage> with WindowListener {
   }
 
   String _snapshot() => jsonEncode({
-        'w': labelW,
-        'h': labelH,
-        'e': [for (final e in elements) e.toJson()],
-      });
+    'w': labelW,
+    'h': labelH,
+    'e': [for (final e in elements) e.toJson(withImage: false)],
+  });
 
   bool get dirty => _snapshot() != _saved;
 
@@ -167,11 +296,8 @@ class _EditorPageState extends State<EditorPage> with WindowListener {
     displayInfoBar(
       context,
       duration: const Duration(seconds: 4),
-      builder: (ctx, close) => InfoBar(
-        title: Text(msg),
-        severity: severity,
-        onClose: close,
-      ),
+      builder: (ctx, close) =>
+          InfoBar(title: Text(msg), severity: severity, onClose: close),
     );
   }
 
@@ -183,19 +309,24 @@ class _EditorPageState extends State<EditorPage> with WindowListener {
       builder: (ctx) => ContentDialog(
         title: const Text('Есть несохранённые изменения'),
         constraints: const BoxConstraints(maxWidth: 360),
-        content: Text(templateName == null
-            ? 'Макет не сохранён как шаблон. Сохранить?'
-            : 'Изменения в шаблоне «$templateName» не сохранены. Сохранить?'),
+        content: Text(
+          templateName == null
+              ? 'Макет не сохранён как шаблон. Сохранить?'
+              : 'Изменения в шаблоне «$templateName» не сохранены. Сохранить?',
+        ),
         actions: [
           FilledButton(
-              onPressed: () => Navigator.pop(ctx, 'save'),
-              child: const Text('Сохранить')),
+            onPressed: () => Navigator.pop(ctx, 'save'),
+            child: const Text('Сохранить'),
+          ),
           Button(
-              onPressed: () => Navigator.pop(ctx, 'discard'),
-              child: const Text('Не сохранять')),
+            onPressed: () => Navigator.pop(ctx, 'discard'),
+            child: const Text('Не сохранять'),
+          ),
           Button(
-              onPressed: () => Navigator.pop(ctx, 'cancel'),
-              child: const Text('Отмена')),
+            onPressed: () => Navigator.pop(ctx, 'cancel'),
+            child: const Text('Отмена'),
+          ),
         ],
       ),
     );
@@ -224,11 +355,13 @@ class _EditorPageState extends State<EditorPage> with WindowListener {
         ),
         actions: [
           FilledButton(
-              onPressed: () => Navigator.pop(ctx, c.text),
-              child: const Text('Сохранить')),
+            onPressed: () => Navigator.pop(ctx, c.text),
+            child: const Text('Сохранить'),
+          ),
           Button(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text('Отмена')),
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Отмена'),
+          ),
         ],
       ),
     );
@@ -244,11 +377,13 @@ class _EditorPageState extends State<EditorPage> with WindowListener {
             content: const Text('Перезаписать?'),
             actions: [
               FilledButton(
-                  onPressed: () => Navigator.pop(ctx, true),
-                  child: const Text('Перезаписать')),
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('Перезаписать'),
+              ),
               Button(
-                  onPressed: () => Navigator.pop(ctx, false),
-                  child: const Text('Нет')),
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('Нет'),
+              ),
             ],
           ),
         );
@@ -272,8 +407,10 @@ class _EditorPageState extends State<EditorPage> with WindowListener {
     try {
       names = await TemplateStore.list();
     } catch (e) {
-      _notify('Не удалось прочитать шаблоны: $e',
-          severity: InfoBarSeverity.error);
+      _notify(
+        'Не удалось прочитать шаблоны: $e',
+        severity: InfoBarSeverity.error,
+      );
       return;
     }
     if (!mounted) return;
@@ -287,29 +424,32 @@ class _EditorPageState extends State<EditorPage> with WindowListener {
             height: 240,
             child: names.isEmpty
                 ? const Center(child: Text('Сохранённых шаблонов нет'))
-                : ListView(children: [
-                    for (final n in names)
-                      ListTile(
-                        leading: const Icon(FluentIcons.document),
-                        title: Text(n),
-                        onPressed: () => Navigator.pop(ctx, n),
-                        trailing: Tooltip(
-                          message: 'Удалить шаблон',
-                          child: IconButton(
-                            icon: const Icon(FluentIcons.delete),
-                            onPressed: () async {
-                              await TemplateStore.delete(n);
-                              setD(() => names.remove(n));
-                            },
+                : ListView(
+                    children: [
+                      for (final n in names)
+                        ListTile(
+                          leading: const Icon(FluentIcons.document),
+                          title: Text(n),
+                          onPressed: () => Navigator.pop(ctx, n),
+                          trailing: Tooltip(
+                            message: 'Удалить шаблон',
+                            child: IconButton(
+                              icon: const Icon(FluentIcons.delete),
+                              onPressed: () async {
+                                await TemplateStore.delete(n);
+                                setD(() => names.remove(n));
+                              },
+                            ),
                           ),
                         ),
-                      ),
-                  ]),
+                    ],
+                  ),
           ),
           actions: [
             Button(
-                onPressed: () => Navigator.pop(ctx),
-                child: const Text('Закрыть')),
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Закрыть'),
+            ),
           ],
         ),
       ),
@@ -342,10 +482,12 @@ class _EditorPageState extends State<EditorPage> with WindowListener {
   Future<void> _preview() async {
     try {
       final bytes = await buildLabelPdf(
-          widthMm: labelW, heightMm: labelH, elements: elements);
+        widthMm: labelW,
+        heightMm: labelH,
+        elements: elements,
+      );
       Uint8List? png;
-      await for (final page
-          in Printing.raster(bytes, pages: [0], dpi: 300)) {
+      await for (final page in Printing.raster(bytes, pages: [0], dpi: 300)) {
         png = await page.toPng();
         break;
       }
@@ -362,7 +504,7 @@ class _EditorPageState extends State<EditorPage> with WindowListener {
                 color: Colors.white,
                 borderRadius: BorderRadius.circular(2),
                 boxShadow: const [
-                  BoxShadow(blurRadius: 12, color: Color(0x40000000))
+                  BoxShadow(blurRadius: 12, color: Color(0x40000000)),
                 ],
               ),
               child: Image.memory(data, fit: BoxFit.contain),
@@ -370,14 +512,17 @@ class _EditorPageState extends State<EditorPage> with WindowListener {
           ),
           actions: [
             FilledButton(
-                onPressed: () => Navigator.pop(ctx),
-                child: const Text('Закрыть')),
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Закрыть'),
+            ),
           ],
         ),
       );
     } catch (e) {
-      _notify('Не удалось построить предпросмотр: $e',
-          severity: InfoBarSeverity.error);
+      _notify(
+        'Не удалось построить предпросмотр: $e',
+        severity: InfoBarSeverity.error,
+      );
     }
   }
 
@@ -451,6 +596,20 @@ class _EditorPageState extends State<EditorPage> with WindowListener {
       setState(() => e.y = _r(e.y + step));
     } else if (ctrl && k == LogicalKeyboardKey.keyD) {
       _duplicate(e);
+    } else if (e.type == ElementType.text &&
+        (k == LogicalKeyboardKey.equal ||
+            k == LogicalKeyboardKey.add ||
+            k == LogicalKeyboardKey.numpadAdd)) {
+      _fontStep(e, 1);
+    } else if (e.type == ElementType.text &&
+        (k == LogicalKeyboardKey.minus ||
+            k == LogicalKeyboardKey.numpadSubtract)) {
+      _fontStep(e, -1);
+    } else if (k == LogicalKeyboardKey.keyR) {
+      _setRotation(
+        e,
+        e.rotation + (HardwareKeyboard.instance.isShiftPressed ? -15 : 15),
+      );
     } else {
       return KeyEventResult.ignored;
     }
@@ -462,7 +621,7 @@ class _EditorPageState extends State<EditorPage> with WindowListener {
   static String _fmt(double v) =>
       v == v.roundToDouble() ? v.toInt().toString() : v.toStringAsFixed(1);
 
-  Color get _bg => micaEnabled ? Colors.transparent : t.scaffoldBackgroundColor;
+  Color get _bg => micaEnabled ? Colors.transparent : t.micaBackgroundColor;
   Color get _panelBg => micaEnabled
       ? t.resources.cardBackgroundFillColorDefault
       : t.resources.solidBackgroundFillColorSecondary;
@@ -513,15 +672,15 @@ class _EditorPageState extends State<EditorPage> with WindowListener {
               Icon(FluentIcons.tag, size: 14, color: t.accentColor),
         ),
         const SizedBox(width: 8),
-        Text(
-          'Печать стикеров',
-          style: t.typography.caption,
-        ),
+        Text('Печать стикеров', style: t.typography.caption),
         if (templateName != null) ...[
           Text('  ·  ', style: t.typography.caption),
-          Text('$templateName${dirty ? ' •' : ''}',
-              style: t.typography.caption
-                  ?.copyWith(color: t.resources.textFillColorSecondary)),
+          Text(
+            '$templateName${dirty ? ' •' : ''}',
+            style: t.typography.caption?.copyWith(
+              color: t.resources.textFillColorSecondary,
+            ),
+          ),
         ] else if (dirty)
           Text('  •', style: t.typography.caption),
       ],
@@ -547,11 +706,13 @@ class _EditorPageState extends State<EditorPage> with WindowListener {
             message: 'Открыть шаблон (Ctrl+O)',
             child: Button(
               onPressed: _loadTemplate,
-              child: const Row(children: [
-                Icon(FluentIcons.open_file, size: 14),
-                SizedBox(width: 8),
-                Text('Открыть'),
-              ]),
+              child: const Row(
+                children: [
+                  Icon(FluentIcons.open_file, size: 14),
+                  SizedBox(width: 8),
+                  Text('Открыть'),
+                ],
+              ),
             ),
           ),
           const SizedBox(width: 8),
@@ -559,11 +720,13 @@ class _EditorPageState extends State<EditorPage> with WindowListener {
             message: 'Сохранить шаблон (Ctrl+S)',
             child: Button(
               onPressed: _saveTemplate,
-              child: const Row(children: [
-                Icon(FluentIcons.save, size: 14),
-                SizedBox(width: 8),
-                Text('Сохранить'),
-              ]),
+              child: const Row(
+                children: [
+                  Icon(FluentIcons.save, size: 14),
+                  SizedBox(width: 8),
+                  Text('Сохранить'),
+                ],
+              ),
             ),
           ),
           const Spacer(),
@@ -577,16 +740,20 @@ class _EditorPageState extends State<EditorPage> with WindowListener {
                 for (final p in printers)
                   ComboBoxItem(
                     value: p.name,
-                    child: Row(children: [
-                      const Icon(FluentIcons.print, size: 14),
-                      const SizedBox(width: 8),
-                      Expanded(
-                          child: Text(p.name, overflow: TextOverflow.ellipsis)),
-                    ]),
+                    child: Row(
+                      children: [
+                        const Icon(FluentIcons.print, size: 14),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(p.name, overflow: TextOverflow.ellipsis),
+                        ),
+                      ],
+                    ),
                   ),
               ],
               onChanged: (n) => setState(
-                  () => printer = printers.firstWhere((p) => p.name == n)),
+                () => printer = printers.firstWhere((p) => p.name == n),
+              ),
             ),
           ),
           const SizedBox(width: 4),
@@ -613,28 +780,33 @@ class _EditorPageState extends State<EditorPage> with WindowListener {
           const SizedBox(width: 12),
           Button(
             onPressed: _preview,
-            child: const Row(children: [
-              Icon(FluentIcons.view, size: 14),
-              SizedBox(width: 8),
-              Text('Просмотр'),
-            ]),
+            child: const Row(
+              children: [
+                Icon(FluentIcons.view, size: 14),
+                SizedBox(width: 8),
+                Text('Просмотр'),
+              ],
+            ),
           ),
           const SizedBox(width: 8),
           Tooltip(
             message: 'Печать (Ctrl+P)',
             child: FilledButton(
               onPressed: printing ? null : _print,
-              child: Row(children: [
-                if (printing)
-                  const SizedBox(
+              child: Row(
+                children: [
+                  if (printing)
+                    const SizedBox(
                       width: 14,
                       height: 14,
-                      child: ProgressRing(strokeWidth: 2))
-                else
-                  const Icon(FluentIcons.print, size: 14),
-                const SizedBox(width: 8),
-                const Text('Печать'),
-              ]),
+                      child: ProgressRing(strokeWidth: 2),
+                    )
+                  else
+                    const Icon(FluentIcons.print, size: 14),
+                  const SizedBox(width: 8),
+                  const Text('Печать'),
+                ],
+              ),
             ),
           ),
         ],
@@ -644,12 +816,15 @@ class _EditorPageState extends State<EditorPage> with WindowListener {
 
   Widget _statusBar() {
     final e = selected;
-    final style = t.typography.caption
-        ?.copyWith(color: t.resources.textFillColorSecondary);
+    final style = t.typography.caption?.copyWith(
+      color: t.resources.textFillColorSecondary,
+    );
     return Container(
       height: 28,
       padding: const EdgeInsets.symmetric(horizontal: 12),
-      decoration: BoxDecoration(border: Border(top: BorderSide(color: _stroke))),
+      decoration: BoxDecoration(
+        border: Border(top: BorderSide(color: _stroke)),
+      ),
       child: Row(
         children: [
           Text('Стикер ${_fmt(labelW)} × ${_fmt(labelH)} мм', style: style),
@@ -662,7 +837,7 @@ class _EditorPageState extends State<EditorPage> with WindowListener {
           const SizedBox(width: 16),
           Expanded(
             child: Text(
-              'Стрелки — сдвиг, Shift — крупнее, Del — удалить',
+              'Стрелки — сдвиг · +/− — размер текста · R — поворот · Del — удалить',
               style: style,
               textAlign: TextAlign.right,
               maxLines: 1,
@@ -672,8 +847,10 @@ class _EditorPageState extends State<EditorPage> with WindowListener {
           const SizedBox(width: 12),
           Container(width: 1, height: 14, color: _stroke),
           const SizedBox(width: 12),
-          Text('Asad Abdullajonov Programm',
-              style: style?.copyWith(fontWeight: FontWeight.w600)),
+          Text(
+            'Asad Abdullajonov Programm',
+            style: style?.copyWith(fontWeight: FontWeight.w600),
+          ),
         ],
       ),
     );
@@ -682,16 +859,17 @@ class _EditorPageState extends State<EditorPage> with WindowListener {
   // --------------------------------------------------------------- left panel
 
   IconData _iconFor(ElementType type) => switch (type) {
-        ElementType.text => FluentIcons.font,
-        ElementType.line => FluentIcons.line,
-        ElementType.rect => FluentIcons.rectangle_shape,
-        ElementType.barcode => FluentIcons.generic_scan,
-      };
+    ElementType.text => FluentIcons.font,
+    ElementType.line => FluentIcons.line,
+    ElementType.rect => FluentIcons.rectangle_shape,
+    ElementType.image => FluentIcons.photo2,
+    ElementType.barcode => FluentIcons.generic_scan,
+  };
 
   Widget _header(String text) => Padding(
-        padding: const EdgeInsets.only(top: 20, bottom: 8),
-        child: Text(text, style: t.typography.bodyStrong),
-      );
+    padding: const EdgeInsets.only(top: 20, bottom: 8),
+    child: Text(text, style: t.typography.bodyStrong),
+  );
 
   Widget _leftPanel() {
     return Container(
@@ -700,61 +878,112 @@ class _EditorPageState extends State<EditorPage> with WindowListener {
         padding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
         children: [
           _header('Размер стикера, мм'),
-          Row(children: [
-            Expanded(
-              child: NumField(
-                label: 'Ширина',
-                value: labelW,
-                min: 10,
-                max: 300,
-                onChanged: (v) => setState(() => labelW = v),
+          Row(
+            children: [
+              Expanded(
+                child: NumField(
+                  label: 'Ширина',
+                  value: labelW,
+                  min: 10,
+                  max: 300,
+                  onChanged: (v) => setState(() => labelW = v),
+                ),
               ),
-            ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: NumField(
-                label: 'Высота',
-                value: labelH,
-                min: 10,
-                max: 300,
-                onChanged: (v) => setState(() => labelH = v),
+              const SizedBox(width: 8),
+              Expanded(
+                child: NumField(
+                  label: 'Высота',
+                  value: labelH,
+                  min: 10,
+                  max: 300,
+                  onChanged: (v) => setState(() => labelH = v),
+                ),
               ),
-            ),
-          ]),
+            ],
+          ),
           const SizedBox(height: 8),
-          Wrap(spacing: 6, runSpacing: 6, children: [
-            for (final p in const [
-              [60.0, 40.0],
-              [58.0, 40.0],
-              [40.0, 30.0],
-              [100.0, 50.0],
-            ])
-              ToggleButton(
-                checked: labelW == p[0] && labelH == p[1],
-                onChanged: (_) => setState(() {
-                  labelW = p[0];
-                  labelH = p[1];
-                }),
-                child: Text('${_fmt(p[0])}×${_fmt(p[1])}'),
-              ),
-          ]),
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: [
+              for (final p in const [
+                [60.0, 40.0],
+                [58.0, 40.0],
+                [40.0, 30.0],
+                [100.0, 50.0],
+              ])
+                ToggleButton(
+                  checked: labelW == p[0] && labelH == p[1],
+                  onChanged: (_) => setState(() {
+                    labelW = p[0];
+                    labelH = p[1];
+                  }),
+                  child: Text('${_fmt(p[0])}×${_fmt(p[1])}'),
+                ),
+            ],
+          ),
           _header('Добавить'),
-          Row(children: [
-            Expanded(child: _addTile(ElementType.text, 'Текст')),
-            const SizedBox(width: 8),
-            Expanded(child: _addTile(ElementType.barcode, 'Штрих-код')),
-          ]),
+          Row(
+            children: [
+              Expanded(
+                child: _tile(
+                  FluentIcons.font,
+                  'Текст',
+                  () => _add(ElementType.text),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: _tile(
+                  FluentIcons.generic_scan,
+                  'Штрих-код',
+                  () => _add(ElementType.barcode),
+                ),
+              ),
+            ],
+          ),
           const SizedBox(height: 8),
-          Row(children: [
-            Expanded(child: _addTile(ElementType.line, 'Линия')),
-            const SizedBox(width: 8),
-            Expanded(child: _addTile(ElementType.rect, 'Рамка')),
-          ]),
+          Row(
+            children: [
+              Expanded(
+                child: _tile(
+                  FluentIcons.line,
+                  'Линия',
+                  () => _add(ElementType.line),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: _tile(
+                  FluentIcons.rectangle_shape,
+                  'Рамка',
+                  () => _add(ElementType.rect),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              Expanded(child: _tile(FluentIcons.photo2, 'Логотип', _addImage)),
+              const SizedBox(width: 8),
+              Expanded(
+                child: _tile(
+                  FluentIcons.picture,
+                  'Фон',
+                  () => _addImage(background: true),
+                ),
+              ),
+            ],
+          ),
           _header('Слои'),
           if (elements.isEmpty)
-            Text('Стикер пуст. Добавьте элемент выше.',
-                style: t.typography.caption
-                    ?.copyWith(color: t.resources.textFillColorSecondary)),
+            Text(
+              'Стикер пуст. Добавьте элемент выше.',
+              style: t.typography.caption?.copyWith(
+                color: t.resources.textFillColorSecondary,
+              ),
+            ),
           for (final e in elements.reversed)
             ListTile.selectable(
               selected: e.id == selectedId,
@@ -772,15 +1001,15 @@ class _EditorPageState extends State<EditorPage> with WindowListener {
     );
   }
 
-  Widget _addTile(ElementType type, String label) {
+  Widget _tile(IconData icon, String label, VoidCallback onPressed) {
     return SizedBox(
       height: 80,
       child: Button(
-        onPressed: () => _add(type),
+        onPressed: onPressed,
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(_iconFor(type), size: 20),
+            Icon(icon, size: 20),
             const SizedBox(height: 6),
             Text(label),
           ],
@@ -796,72 +1025,140 @@ class _EditorPageState extends State<EditorPage> with WindowListener {
       color: micaEnabled
           ? Colors.transparent
           : t.resources.solidBackgroundFillColorTertiary,
-      child: LayoutBuilder(builder: (context, c) {
-        final scale = (((c.maxWidth - 80) / labelW)
-                .clamp(1.0, 40.0))
-            .clamp(0.0, ((c.maxHeight - 100) / labelH).clamp(1.0, 40.0));
-        return GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTap: () {
-            setState(() => selectedId = null);
-            _pageFocus.requestFocus();
-          },
-          child: Center(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Container(
-                  width: labelW * scale,
-                  height: labelH * scale,
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(2),
-                    boxShadow: const [
-                      BoxShadow(
+      child: LayoutBuilder(
+        builder: (context, c) {
+          final scale = (((c.maxWidth - 80) / labelW).clamp(
+            1.0,
+            40.0,
+          )).clamp(0.0, ((c.maxHeight - 100) / labelH).clamp(1.0, 40.0));
+          return GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () {
+              setState(() => selectedId = null);
+              _pageFocus.requestFocus();
+            },
+            child: Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    key: _labelKey,
+                    width: labelW * scale,
+                    height: labelH * scale,
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(2),
+                      boxShadow: const [
+                        BoxShadow(
                           blurRadius: 16,
                           offset: Offset(0, 4),
-                          color: Color(0x33000000)),
-                    ],
-                  ),
-                  child: GestureDetector(
-                    onTap: () => setState(() => selectedId = null),
-                    child: Stack(
-                      clipBehavior: Clip.hardEdge,
-                      children: [
-                        for (final e in elements) _canvasElement(e, scale),
+                          color: Color(0x33000000),
+                        ),
                       ],
                     ),
+                    child: GestureDetector(
+                      onTap: () => setState(() => selectedId = null),
+                      child: Stack(
+                        clipBehavior: Clip.none,
+                        children: [
+                          Positioned.fill(
+                            child: ClipRect(
+                              child: Stack(
+                                children: [
+                                  for (final e in elements)
+                                    _canvasElement(e, scale),
+                                ],
+                              ),
+                            ),
+                          ),
+                          // Рамка и ручки выделенного элемента — поверх всего
+                          // и без обрезки по краю стикера.
+                          if (selected != null) _handles(selected!, scale),
+                        ],
+                      ),
+                    ),
                   ),
-                ),
-                const SizedBox(height: 12),
-                Text(
-                  '${_fmt(labelW)} × ${_fmt(labelH)} мм',
-                  style: t.typography.caption
-                      ?.copyWith(color: t.resources.textFillColorSecondary),
-                ),
-              ],
+                  const SizedBox(height: 12),
+                  Text(
+                    '${_fmt(labelW)} × ${_fmt(labelH)} мм',
+                    style: t.typography.caption?.copyWith(
+                      color: t.resources.textFillColorSecondary,
+                    ),
+                  ),
+                ],
+              ),
             ),
-          ),
-        );
-      }),
+          );
+        },
+      ),
     );
   }
 
   Size _elementSize(LabelElement e) {
     switch (e.type) {
       case ElementType.line:
-        return e.vertical ? Size(e.thickness, e.h) : Size(e.w, e.thickness);
+        return Size(e.w, e.thickness);
       case ElementType.text:
-        return Size(e.w, e.fontSize * _ptToMm * 1.25);
+        return Size(e.w, textBoxHeightMm(e));
       default:
         return Size(e.w, e.h);
     }
   }
 
+  /// Меняет размер в системе координат самого элемента (с учётом поворота)
+  /// так, чтобы левый верхний угол визуально оставался на месте.
+  /// У текста тянется не рамка, а размер шрифта: текст масштабируется целиком.
+  void _resizeLocal(LabelElement e, double dw, double dh) {
+    final s0 = _elementSize(e);
+    final rad = e.rotation * math.pi / 180;
+    Offset rot(Offset v) => Offset(
+      v.dx * math.cos(rad) - v.dy * math.sin(rad),
+      v.dx * math.sin(rad) + v.dy * math.cos(rad),
+    );
+    final c0 = Offset(e.x + s0.width / 2, e.y + s0.height / 2);
+    final topLeft = c0 + rot(Offset(-s0.width / 2, -s0.height / 2));
+
+    switch (e.type) {
+      case ElementType.line:
+        e.w = _r(e.w + dw).clamp(1.0, 500.0).toDouble();
+      case ElementType.text:
+        final f = 1 + (dw / s0.width + dh / s0.height) / 2;
+        e.fontSize = (((e.fontSize * f) * 2).round() / 2)
+            .clamp(3.0, 200.0)
+            .toDouble();
+        e.w = _r(e.w * f).clamp(3.0, 500.0).toDouble();
+      default:
+        e.w = _r(e.w + dw).clamp(0.5, 500.0).toDouble();
+        e.h = _r(e.h + dh).clamp(0.5, 500.0).toDouble();
+    }
+
+    final s1 = _elementSize(e);
+    final c1 = topLeft + rot(Offset(s1.width / 2, s1.height / 2));
+    e.x = _r(c1.dx - s1.width / 2);
+    e.y = _r(c1.dy - s1.height / 2);
+  }
+
+  void _rotateByPointer(LabelElement e, double s, Offset global) {
+    final box = _labelKey.currentContext?.findRenderObject() as RenderBox?;
+    if (box == null) return;
+    final size = _elementSize(e);
+    final p = box.globalToLocal(global);
+    final c = Offset((e.x + size.width / 2) * s, (e.y + size.height / 2) * s);
+    var deg = math.atan2(p.dy - c.dy, p.dx - c.dx) * 180 / math.pi + 90;
+    deg = ((deg % 360) + 360) % 360;
+    if (HardwareKeyboard.instance.isShiftPressed) {
+      deg = (deg / 15).round() * 15.0;
+    } else {
+      // «Прилипание» к ровным углам, чтобы легко выставить 0°, 45°, 90°...
+      for (var a = 0; a <= 360; a += 45) {
+        if ((deg - a).abs() < 3) deg = a.toDouble();
+      }
+    }
+    setState(() => e.rotation = deg.roundToDouble() % 360);
+  }
+
   Widget _canvasElement(LabelElement e, double s) {
     final size = _elementSize(e);
-    final isSel = e.id == selectedId;
-    final accent = t.accentColor;
     Widget content;
     switch (e.type) {
       case ElementType.text:
@@ -883,14 +1180,29 @@ class _EditorPageState extends State<EditorPage> with WindowListener {
             border: Border.all(color: Colors.black, width: e.thickness * s),
           ),
         );
+      case ElementType.image:
+        final bytes = e.imageBytes;
+        content = bytes == null
+            ? Container(color: const Color(0x22808080))
+            : Opacity(
+                opacity: e.opacity,
+                child: Image.memory(
+                  bytes,
+                  fit: e.cover ? BoxFit.cover : BoxFit.contain,
+                  gaplessPlayback: true,
+                  filterQuality: FilterQuality.medium,
+                ),
+              );
       case ElementType.barcode:
         final bc = e.kind.barcode;
         content = (e.text.isEmpty || !bc.isValid(e.text))
             ? Container(
                 color: Colors.red.withValues(alpha: 0.08),
                 alignment: Alignment.center,
-                child: Text('Неверное значение',
-                    style: TextStyle(color: Colors.red, fontSize: 11)),
+                child: Text(
+                  'Неверное значение',
+                  style: TextStyle(color: Colors.red, fontSize: 11),
+                ),
               )
             : BarcodeWidget(
                 barcode: bc,
@@ -901,77 +1213,136 @@ class _EditorPageState extends State<EditorPage> with WindowListener {
               );
     }
 
-    // Невидимая область побольше, чтобы тонкую линию было легко схватить.
+    // Область захвата чуть больше самого элемента: тонкую линию легко схватить.
     const pad = 6.0;
     return Positioned(
-      left: e.x * s - pad,
-      top: e.y * s - pad,
-      child: GestureDetector(
-        behavior: HitTestBehavior.translucent,
-        onTap: () {
-          setState(() => selectedId = e.id);
-          _pageFocus.requestFocus();
-        },
-        onPanStart: (_) {
-          setState(() => selectedId = e.id);
-          _pageFocus.requestFocus();
-        },
-        onPanUpdate: (d) => setState(() {
-          e.x = _r(e.x + d.delta.dx / s);
-          e.y = _r(e.y + d.delta.dy / s);
-        }),
-        child: MouseRegion(
-          cursor: SystemMouseCursors.move,
-          child: Padding(
-            padding: const EdgeInsets.all(pad),
-            child: Stack(
-              clipBehavior: Clip.none,
-              children: [
-                Container(
-                  width: size.width * s,
-                  height: size.height * s,
-                  decoration: isSel
-                      ? BoxDecoration(
-                          border: Border.all(color: accent, width: 1.5))
-                      : null,
-                  child: ClipRect(child: content),
+      left: e.x * s,
+      top: e.y * s,
+      width: size.width * s,
+      height: size.height * s,
+      child: Transform.rotate(
+        angle: e.rotation * math.pi / 180,
+        child: Stack(
+          clipBehavior: Clip.none,
+          children: [
+            Positioned(
+              left: -pad,
+              top: -pad,
+              right: -pad,
+              bottom: -pad,
+              child: GestureDetector(
+                behavior: HitTestBehavior.translucent,
+                onTap: () {
+                  setState(() => selectedId = e.id);
+                  _pageFocus.requestFocus();
+                },
+                onPanStart: (d) {
+                  _lastGlobal = d.globalPosition;
+                  setState(() => selectedId = e.id);
+                  _pageFocus.requestFocus();
+                },
+                // Считаем по глобальным координатам: локальные повёрнуты вместе
+                // с элементом.
+                onPanUpdate: (d) {
+                  final delta =
+                      d.globalPosition - (_lastGlobal ?? d.globalPosition);
+                  _lastGlobal = d.globalPosition;
+                  setState(() {
+                    e.x = _r(e.x + delta.dx / s);
+                    e.y = _r(e.y + delta.dy / s);
+                  });
+                },
+                child: MouseRegion(
+                  cursor: SystemMouseCursors.move,
+                  child: Padding(
+                    padding: const EdgeInsets.all(pad),
+                    child: ClipRect(child: content),
+                  ),
                 ),
-                if (isSel)
-                  Positioned(
-                    right: -6,
-                    bottom: -6,
-                    child: GestureDetector(
-                      onPanUpdate: (d) => setState(() {
-                        if (e.type == ElementType.line) {
-                          if (e.vertical) {
-                            e.h = _r(e.h + d.delta.dy / s).clamp(1, 500);
-                          } else {
-                            e.w = _r(e.w + d.delta.dx / s).clamp(1, 500);
-                          }
-                        } else {
-                          e.w = _r(e.w + d.delta.dx / s).clamp(1, 500);
-                          if (e.type != ElementType.text) {
-                            e.h = _r(e.h + d.delta.dy / s).clamp(1, 500);
-                          }
-                        }
-                      }),
-                      child: MouseRegion(
-                        cursor: SystemMouseCursors.resizeDownRight,
-                        child: Container(
-                          width: 12,
-                          height: 12,
-                          decoration: BoxDecoration(
-                            color: Colors.white,
-                            border: Border.all(color: accent, width: 2),
-                            borderRadius: BorderRadius.circular(6),
-                          ),
-                        ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _handles(LabelElement e, double s) {
+    final size = _elementSize(e);
+    final accent = t.accentColor;
+    final w = size.width * s;
+    return Positioned(
+      left: e.x * s,
+      top: e.y * s,
+      width: w,
+      height: size.height * s,
+      child: Transform.rotate(
+        angle: e.rotation * math.pi / 180,
+        child: Stack(
+          clipBehavior: Clip.none,
+          children: [
+            Positioned.fill(
+              child: IgnorePointer(
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    border: Border.all(color: accent, width: 1.5),
+                  ),
+                ),
+              ),
+            ),
+            // Ручка поворота над элементом.
+            Positioned(
+              left: w / 2 - 0.75,
+              top: -22,
+              width: 1.5,
+              height: 22,
+              child: IgnorePointer(child: ColoredBox(color: accent)),
+            ),
+            Positioned(
+              left: w / 2 - 8,
+              top: -38,
+              child: Tooltip(
+                message: 'Повернуть (Shift — шаг 15°)',
+                child: GestureDetector(
+                  onPanUpdate: (d) => _rotateByPointer(e, s, d.globalPosition),
+                  child: MouseRegion(
+                    cursor: SystemMouseCursors.grab,
+                    child: Container(
+                      width: 16,
+                      height: 16,
+                      decoration: BoxDecoration(
+                        color: accent,
+                        shape: BoxShape.circle,
+                        border: Border.all(color: Colors.white, width: 2),
                       ),
                     ),
                   ),
-              ],
+                ),
+              ),
             ),
-          ),
+            // Ручка размера в правом нижнем углу.
+            Positioned(
+              right: -7,
+              bottom: -7,
+              child: GestureDetector(
+                onPanUpdate: (d) => setState(
+                  () => _resizeLocal(e, d.delta.dx / s, d.delta.dy / s),
+                ),
+                child: MouseRegion(
+                  cursor: SystemMouseCursors.resizeDownRight,
+                  child: Container(
+                    width: 14,
+                    height: 14,
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      border: Border.all(color: accent, width: 2),
+                      borderRadius: BorderRadius.circular(7),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
         ),
       ),
     );
@@ -980,11 +1351,11 @@ class _EditorPageState extends State<EditorPage> with WindowListener {
   // --------------------------------------------------------- properties panel
 
   static String _hint(BarcodeKind k) => switch (k) {
-        BarcodeKind.code128 => 'Любые символы латиницы и цифры',
-        BarcodeKind.ean13 => '12 или 13 цифр (контрольная считается сама)',
-        BarcodeKind.code39 => 'Заглавные A–Z, цифры, пробел и - . \$ / + %',
-        BarcodeKind.qr => 'Любой текст или ссылка',
-      };
+    BarcodeKind.code128 => 'Любые символы латиницы и цифры',
+    BarcodeKind.ean13 => '12 или 13 цифр (контрольная считается сама)',
+    BarcodeKind.code39 => 'Заглавные A–Z, цифры, пробел и - . \$ / + %',
+    BarcodeKind.qr => 'Любой текст или ссылка',
+  };
 
   Widget _propsPanel() {
     final e = selected;
@@ -997,13 +1368,19 @@ class _EditorPageState extends State<EditorPage> with WindowListener {
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Icon(FluentIcons.touch_pointer,
-                        size: 28, color: t.resources.textFillColorSecondary),
+                    Icon(
+                      FluentIcons.touch_pointer,
+                      size: 28,
+                      color: t.resources.textFillColorSecondary,
+                    ),
                     const SizedBox(height: 12),
-                    Text('Выберите элемент на стикере',
-                        textAlign: TextAlign.center,
-                        style: t.typography.body?.copyWith(
-                            color: t.resources.textFillColorSecondary)),
+                    Text(
+                      'Выберите элемент на стикере',
+                      textAlign: TextAlign.center,
+                      style: t.typography.body?.copyWith(
+                        color: t.resources.textFillColorSecondary,
+                      ),
+                    ),
                   ],
                 ),
               ),
@@ -1014,44 +1391,49 @@ class _EditorPageState extends State<EditorPage> with WindowListener {
 
   Widget _props(LabelElement e) {
     final isLine = e.type == ElementType.line;
-    final invalid = e.type == ElementType.barcode &&
+    final isText = e.type == ElementType.text;
+    final invalid =
+        e.type == ElementType.barcode &&
         (e.text.isEmpty || !e.kind.barcode.isValid(e.text));
+    final dim = t.typography.caption?.copyWith(
+      color: t.resources.textFillColorSecondary,
+    );
     return ListView(
       key: ValueKey(e.id),
       padding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
       children: [
         Padding(
           padding: const EdgeInsets.only(top: 16),
-          child: Row(children: [
-            Icon(_iconFor(e.type), size: 18),
-            const SizedBox(width: 8),
-            Text(e.title, style: t.typography.subtitle),
-            const Spacer(),
-            Tooltip(
-              message: 'Дублировать (Ctrl+D)',
-              child: IconButton(
-                icon: const Icon(FluentIcons.copy),
-                onPressed: () => _duplicate(e),
+          child: Row(
+            children: [
+              Icon(_iconFor(e.type), size: 18),
+              const SizedBox(width: 8),
+              Text(e.title, style: t.typography.subtitle),
+              const Spacer(),
+              Tooltip(
+                message: 'Дублировать (Ctrl+D)',
+                child: IconButton(
+                  icon: const Icon(FluentIcons.copy),
+                  onPressed: () => _duplicate(e),
+                ),
               ),
-            ),
-            Tooltip(
-              message: 'Удалить (Del)',
-              child: IconButton(
-                icon: Icon(FluentIcons.delete, color: Colors.red),
-                onPressed: () => _remove(e),
+              Tooltip(
+                message: 'Удалить (Del)',
+                child: IconButton(
+                  icon: Icon(FluentIcons.delete, color: Colors.red),
+                  onPressed: () => _remove(e),
+                ),
               ),
-            ),
-          ]),
+            ],
+          ),
         ),
-        if (e.type == ElementType.text || e.type == ElementType.barcode) ...[
+        if (isText || e.type == ElementType.barcode) ...[
           _header('Содержимое'),
           InfoLabel(
-            label: e.type == ElementType.text ? 'Текст' : 'Значение',
+            label: isText ? 'Текст' : 'Значение',
             child: TextBox(
               controller: _ctl(e),
-              placeholder: e.type == ElementType.text
-                  ? 'Введите текст'
-                  : 'Введите число или код',
+              placeholder: isText ? 'Введите текст' : 'Введите число или код',
               onChanged: (v) => setState(() => e.text = v),
             ),
           ),
@@ -1077,23 +1459,22 @@ class _EditorPageState extends State<EditorPage> with WindowListener {
             ),
           ),
           const SizedBox(height: 8),
-          Row(children: [
-            if (invalid) ...[
-              Icon(FluentIcons.error_badge, size: 14, color: Colors.red),
-              const SizedBox(width: 6),
-            ],
-            Expanded(
-              child: Text(
-                invalid
-                    ? 'Неверное значение. ${_hint(e.kind)}'
-                    : _hint(e.kind),
-                style: t.typography.caption?.copyWith(
-                    color: invalid
-                        ? Colors.red
-                        : t.resources.textFillColorSecondary),
+          Row(
+            children: [
+              if (invalid) ...[
+                Icon(FluentIcons.error_badge, size: 14, color: Colors.red),
+                const SizedBox(width: 6),
+              ],
+              Expanded(
+                child: Text(
+                  invalid
+                      ? 'Неверное значение. ${_hint(e.kind)}'
+                      : _hint(e.kind),
+                  style: dim?.copyWith(color: invalid ? Colors.red : null),
+                ),
               ),
-            ),
-          ]),
+            ],
+          ),
           if (e.kind != BarcodeKind.qr) ...[
             const SizedBox(height: 12),
             ToggleSwitch(
@@ -1103,14 +1484,42 @@ class _EditorPageState extends State<EditorPage> with WindowListener {
             ),
           ],
         ],
-        if (e.type == ElementType.text) ...[
+        if (isText) ...[
           _header('Шрифт'),
-          NumField(
-            label: 'Размер, pt',
-            value: e.fontSize,
-            min: 3,
-            max: 100,
-            onChanged: (v) => setState(() => e.fontSize = v),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              Tooltip(
+                message: 'Меньше (−)',
+                child: Button(
+                  onPressed: () => _fontStep(e, -1),
+                  child: const Icon(FluentIcons.remove, size: 14),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: NumField(
+                  label: 'Размер, pt',
+                  value: e.fontSize,
+                  min: 3,
+                  max: 200,
+                  onChanged: (v) => setState(() => e.fontSize = v),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Tooltip(
+                message: 'Больше (+)',
+                child: Button(
+                  onPressed: () => _fontStep(e, 1),
+                  child: const Icon(FluentIcons.add, size: 14),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          Text(
+            'Размер также меняется ручкой в углу текста на стикере.',
+            style: dim,
           ),
           const SizedBox(height: 12),
           ToggleSwitch(
@@ -1119,8 +1528,50 @@ class _EditorPageState extends State<EditorPage> with WindowListener {
             content: const Text('Жирный'),
           ),
         ],
+        if (e.type == ElementType.image) ...[
+          _header('Изображение'),
+          Button(
+            onPressed: () => _replaceImage(e),
+            child: const Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(FluentIcons.open_file, size: 14),
+                SizedBox(width: 8),
+                Text('Заменить файл…'),
+              ],
+            ),
+          ),
+          const SizedBox(height: 8),
+          Button(
+            onPressed: () => _fitToLabel(e),
+            child: const Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(FluentIcons.fit_page, size: 14),
+                SizedBox(width: 8),
+                Text('Растянуть на весь стикер'),
+              ],
+            ),
+          ),
+          const SizedBox(height: 12),
+          ToggleSwitch(
+            checked: e.cover,
+            onChanged: (v) => setState(() => e.cover = v),
+            content: const Text('Заполнить область (с обрезкой)'),
+          ),
+          const SizedBox(height: 12),
+          InfoLabel(
+            label: 'Прозрачность: ${((1 - e.opacity) * 100).round()}%',
+            child: Slider(
+              value: (1 - e.opacity) * 100,
+              min: 0,
+              max: 90,
+              onChanged: (v) => setState(() => e.opacity = 1 - v / 100),
+            ),
+          ),
+        ],
         if (isLine || e.type == ElementType.rect) ...[
-          _header('Линия'),
+          _header(isLine ? 'Линия' : 'Рамка'),
           NumField(
             label: 'Толщина, мм',
             value: e.thickness,
@@ -1129,61 +1580,161 @@ class _EditorPageState extends State<EditorPage> with WindowListener {
             onChanged: (v) => setState(() => e.thickness = v),
           ),
         ],
-        if (isLine) ...[
-          const SizedBox(height: 12),
-          ToggleSwitch(
-            checked: e.vertical,
-            onChanged: (v) => setState(() => e.vertical = v),
-            content: const Text('Вертикальная'),
-          ),
-        ],
+        _header('Поворот'),
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: [
+            Expanded(
+              child: NumField(
+                label: 'Угол, °',
+                value: e.rotation,
+                min: -360,
+                max: 360,
+                onChanged: (v) => _setRotation(e, v),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Tooltip(
+              message: 'Против часовой на 15°',
+              child: Button(
+                onPressed: () => _setRotation(e, e.rotation - 15),
+                child: const Text('−15°'),
+              ),
+            ),
+            const SizedBox(width: 4),
+            Tooltip(
+              message: 'По часовой на 15° (R)',
+              child: Button(
+                onPressed: () => _setRotation(e, e.rotation + 15),
+                child: const Text('+15°'),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        Slider(
+          value: e.rotation.clamp(0.0, 360.0).toDouble(),
+          min: 0,
+          max: 360,
+          onChanged: (v) {
+            // Лёгкое прилипание к 0/45/90/…, чтобы удобно ставить ровно.
+            final snapped = (v / 45).round() * 45.0;
+            _setRotation(
+              e,
+              (v - snapped).abs() < 3 ? snapped : v.roundToDouble(),
+            );
+          },
+        ),
+        Row(
+          children: [
+            for (final a in const [0.0, 90.0, 180.0, 270.0]) ...[
+              Expanded(
+                child: Button(
+                  onPressed: () => _setRotation(e, a),
+                  child: Text('${a.toInt()}°'),
+                ),
+              ),
+              if (a != 270) const SizedBox(width: 6),
+            ],
+          ],
+        ),
+        const SizedBox(height: 4),
+        Text(
+          'Элемент вращается за кружок над ним; с Shift — шаг 15°.',
+          style: dim,
+        ),
         _header('Положение, мм'),
-        Row(children: [
-          Expanded(
-            child: NumField(
+        Row(
+          children: [
+            Expanded(
+              child: NumField(
                 label: 'X',
                 value: e.x,
                 min: -500,
                 max: 500,
-                onChanged: (v) => setState(() => e.x = v)),
-          ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: NumField(
+                onChanged: (v) => setState(() => e.x = v),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: NumField(
                 label: 'Y',
                 value: e.y,
                 min: -500,
                 max: 500,
-                onChanged: (v) => setState(() => e.y = v)),
-          ),
-        ]),
-        ...[
-          _header('Размер, мм'),
-          Row(children: [
-            if (!(isLine && e.vertical))
-              Expanded(
-                child: NumField(
-                    label: isLine ? 'Длина' : 'Ширина',
-                    value: e.w,
-                    min: 0.5,
-                    max: 500,
-                    onChanged: (v) => setState(() => e.w = v)),
+                onChanged: (v) => setState(() => e.y = v),
               ),
-            if (!(isLine && e.vertical) &&
-                e.type != ElementType.text &&
-                !isLine)
+            ),
+          ],
+        ),
+        _header('Размер, мм'),
+        Row(
+          children: [
+            Expanded(
+              child: NumField(
+                label: isLine ? 'Длина' : 'Ширина',
+                value: e.w,
+                min: 0.5,
+                max: 500,
+                onChanged: (v) => setState(() => e.w = v),
+              ),
+            ),
+            if (!isText && !isLine) ...[
               const SizedBox(width: 8),
-            if (e.type != ElementType.text && !(isLine && !e.vertical))
               Expanded(
                 child: NumField(
-                    label: isLine ? 'Длина' : 'Высота',
-                    value: e.h,
-                    min: 0.5,
-                    max: 500,
-                    onChanged: (v) => setState(() => e.h = v)),
+                  label: 'Высота',
+                  value: e.h,
+                  min: 0.5,
+                  max: 500,
+                  onChanged: (v) => setState(() => e.h = v),
+                ),
               ),
-          ]),
-        ],
+            ],
+          ],
+        ),
+        _header('Порядок слоёв'),
+        Row(
+          children: [
+            Expanded(
+              child: Tooltip(
+                message: 'Вперёд на один слой',
+                child: Button(
+                  onPressed: () => _reorder(e, 2),
+                  child: const Icon(FluentIcons.chevron_up, size: 14),
+                ),
+              ),
+            ),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Tooltip(
+                message: 'Назад на один слой',
+                child: Button(
+                  onPressed: () => _reorder(e, 1),
+                  child: const Icon(FluentIcons.chevron_down, size: 14),
+                ),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 6),
+        Row(
+          children: [
+            Expanded(
+              child: Button(
+                onPressed: () => _reorder(e, 3),
+                child: const Text('Наверх'),
+              ),
+            ),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Button(
+                onPressed: () => _reorder(e, 0),
+                child: const Text('На задний план'),
+              ),
+            ),
+          ],
+        ),
       ],
     );
   }
