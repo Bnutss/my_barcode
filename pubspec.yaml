@@ -1,0 +1,33 @@
+name: my_barcode
+description: "Редактор и печать стикеров со штрих-кодами для Windows."
+
+publish_to: 'none'
+
+
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.13.2
+
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+  barcode: ^2.2.9
+  pdf: ^3.13.1
+  printing: ^5.15.1
+  barcode_widget: ^2.0.4
+  fluent_ui: ^4.17.0
+  window_manager: ">=0.5.0 <0.6.0"
+  flutter_acrylic: ^1.1.4
+  system_theme: ^3.3.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+
+flutter:
+  uses-material-design: true
